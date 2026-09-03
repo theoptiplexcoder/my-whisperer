@@ -1,0 +1,73 @@
+#!/bin/bash
+
+set -e
+
+VOICE_DIR="$HOME/.cache/voiceprompt"
+AUDIO="$VOICE_DIR/recording.wav"
+PIDFILE="$VOICE_DIR/record.pid"
+TEXT="$VOICE_DIR/result.txt"
+
+WHISPER="/home/ybl/git/whisper.cpp/build/bin/whisper-cli"
+MODEL="/home/ybl/git/whisper.cpp/models/ggml-small.bin"
+
+if [[ ! -f "$PIDFILE" ]]; then
+    exit 0
+fi
+
+PID=$(cat "$PIDFILE")
+rm -f "$PIDFILE"
+
+# Stop recording
+if kill -0 "$PID" 2>/dev/null; then
+    kill -INT "$PID" 2>/dev/null || true
+    while kill -0 "$PID" 2>/dev/null; do
+        sleep 0.1
+    done
+fi
+
+# Make sure recording has actual audio data (WAV header is 44 bytes)
+AUDIO_SIZE=$(stat -c%s "$AUDIO" 2>/dev/null || echo 0)
+if (( AUDIO_SIZE <= 44 )); then
+    notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 1500 "Voice Input" "No audio recorded"
+    exit 1
+fi
+
+notify-send \
+    -h string:x-canonical-private-synchronous:voiceprompt \
+    -t 1200 \
+    "Voice Input" \
+    "Transcribing..."
+
+rm -f "$TEXT"
+
+"$WHISPER" \
+    -m "$MODEL" \
+    -f "$AUDIO" \
+    -l en \
+    -nt \
+    -np \
+    -of "$VOICE_DIR/result" \
+    -otxt \
+    > "$VOICE_DIR/whisper.log" 2>&1
+
+if [[ ! -f "$TEXT" ]]; then
+    notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 2000 "Voice Input" "Transcription failed"
+    exit 1
+fi
+
+# Remove leading/trailing whitespace
+sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEXT"
+
+if [[ ! -s "$TEXT" ]]; then
+    notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 1500 "Voice Input" "No speech detected"
+    exit 0
+fi
+
+# Copy transcription to Wayland clipboard
+wl-copy < "$TEXT"
+
+notify-send \
+    -h string:x-canonical-private-synchronous:voiceprompt \
+    -t 1500 \
+    "Voice Input" \
+    "$(cat "$TEXT")"

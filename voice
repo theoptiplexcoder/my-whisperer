@@ -1,0 +1,35 @@
+#!/bin/bash
+
+set -e
+
+VOICE_DIR="$HOME/.cache/voiceprompt"
+AUDIO="$VOICE_DIR/recording.wav"
+PIDFILE="$VOICE_DIR/record.pid"
+
+mkdir -p "$VOICE_DIR"
+
+# Don't start another recorder if one is already running
+if [[ -f "$PIDFILE" ]]; then
+    PID=$(cat "$PIDFILE")
+
+    if kill -0 "$PID" 2>/dev/null; then
+        exit 0
+    fi
+
+    rm -f "$PIDFILE"
+fi
+
+rm -f "$AUDIO"
+
+notify-send \
+    -t 1000 \
+    "Voice Input" \
+    "Recording..."
+
+pw-record \
+    --rate 16000 \
+    --channels 1 \
+    --format s16 \
+    "$AUDIO" &
+
+echo $! > "$PIDFILE"

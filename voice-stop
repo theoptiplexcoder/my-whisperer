@@ -8,7 +8,7 @@ PIDFILE="$VOICE_DIR/record.pid"
 TEXT="$VOICE_DIR/result.txt"
 
 WHISPER="/home/ybl/git/whisper.cpp/build/bin/whisper-cli"
-MODEL="/home/ybl/git/whisper.cpp/models/ggml-small.bin"
+MODEL="/home/ybl/git/whisper.cpp/models/ggml-base.en.bin"
 
 if [[ ! -f "$PIDFILE" ]]; then
     exit 0
@@ -44,6 +44,10 @@ rm -f "$TEXT"
     -m "$MODEL" \
     -f "$AUDIO" \
     -l en \
+    -ng \
+    -t 4 \
+    -bs 1 \
+    -bo 1 \
     -nt \
     -np \
     -of "$VOICE_DIR/result" \

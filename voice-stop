@@ -67,6 +67,55 @@ if [[ ! -s "$TEXT" ]]; then
     exit 0
 fi
 
+# Post-process with s1-mini text normalizer via Ollama
+RAW_TEXT=$(cat "$TEXT")
+CLEANED_TEXT=$(python3 -c "
+import urllib.request
+import json
+import sys
+
+raw_text = sys.stdin.read().strip()
+if not raw_text:
+    sys.exit(0)
+
+system_prompt = 'You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.'
+control_line = '[Styling: semi-formal] [Structure: prose] [Context: general]'
+full_prompt = (
+    f'<|im_start|>system\n{system_prompt}<|im_end|>\n'
+    f'<|im_start|>user\n{control_line}\n{raw_text}<|im_end|>\n'
+    '<|im_start|>assistant\n<think>\n\n</think>\n\n'
+)
+
+payload = {
+    'model': 's1-mini',
+    'prompt': full_prompt,
+    'raw': True,
+    'stream': False,
+    'options': {'temperature': 0}
+}
+
+try:
+    req = urllib.request.Request(
+        'http://127.0.0.1:11434/api/generate',
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+        resp_text = res.get('response', '').strip()
+        sys.stdout.write(resp_text)
+except Exception:
+    # If Ollama request fails, fallback to raw transcription
+    sys.stdout.write(raw_text)
+" < "$TEXT")
+
+printf "%s" "$CLEANED_TEXT" > "$TEXT"
+
+if [[ ! -s "$TEXT" ]]; then
+    notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 1500 "Voice Input" "No speech detected"
+    exit 0
+fi
+
 # Copy transcription to Wayland clipboard
 wl-copy < "$TEXT"
 

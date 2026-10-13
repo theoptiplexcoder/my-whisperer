@@ -1,0 +1,27 @@
+{
+  "name": "my-whisperer",
+  "version": "1.0.0",
+  "description": "Cross-platform push-to-talk voice capture, transcription, and AI normalization",
+  "main": "scripts/index.js",
+  "bin": {
+    "whisperer": "scripts/index.js"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "toggle": "node scripts/toggle.js",
+    "record:start": "node scripts/record.js start",
+    "record:stop": "node scripts/record.js stop",
+    "status": "node scripts/status.js"
+  },
+  "keywords": [
+    "voice",
+    "speech-to-text",
+    "whisper",
+    "whisper.cpp",
+    "s1-mini",
+    "ollama",
+    "dictation"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -32,12 +32,38 @@ async function getOllamaModels() {
   });
 }
 
-function resolveWhisperCli() {
-  // 1. Check local repo bin directory
+function resolveNeedleCli() {
   const ext = process.platform === 'win32' ? '.exe' : '';
+  const localBin = path.join(CONFIG.paths.bin, `needle${ext}`);
+  if (fs.existsSync(localBin)) {
+    return localBin;
+  }
+  if (checkCommand('needle')) {
+    return 'needle';
+  }
+  return null;
+}
+
+function resolveWhisperCli() {
+  const ext = process.platform === 'win32' ? '.exe' : '';
+
+  // 1. Check local repo bin directory (standalone executable or wrapper script)
   const localBin = path.join(CONFIG.paths.bin, `whisper-cli${ext}`);
   if (fs.existsSync(localBin)) {
     return localBin;
+  }
+
+  // 1b. Check extracted release directories in bin
+  if (fs.existsSync(CONFIG.paths.bin)) {
+    const entries = fs.readdirSync(CONFIG.paths.bin);
+    for (const entry of entries) {
+      if (entry.startsWith('whisper-bin-')) {
+        const subBin = path.join(CONFIG.paths.bin, entry, `whisper-cli${ext}`);
+        if (fs.existsSync(subBin)) {
+          return subBin;
+        }
+      }
+    }
   }
 
   // 2. Check system PATH
@@ -68,6 +94,16 @@ async function setupWhisperCli() {
   console.log('\n--- 1. Setting up whisper-cli ---');
   let whisperCli = resolveWhisperCli();
   if (whisperCli) {
+    // If resolved from a subdirectory, ensure bin/whisper-cli wrapper exists for convenience
+    const ext = process.platform === 'win32' ? '.exe' : '';
+    const targetBinPath = path.join(CONFIG.paths.bin, `whisper-cli${ext}`);
+    if (whisperCli !== targetBinPath && !fs.existsSync(targetBinPath)) {
+      if (process.platform === 'linux') {
+        const candDir = path.dirname(whisperCli);
+        const script = `#!/bin/sh\nexport LD_LIBRARY_PATH="${candDir}:$LD_LIBRARY_PATH"\nexec "${whisperCli}" "$@"\n`;
+        fs.writeFileSync(targetBinPath, script, { mode: 0o755 });
+      }
+    }
     console.log(`[setup] Found existing whisper-cli at: ${whisperCli}`);
     return whisperCli;
   }
@@ -100,17 +136,37 @@ async function setupWhisperCli() {
       }
 
       // Check if whisper-cli was extracted
-      // In the archive, it may be named main or whisper-cli or under build/bin
+      // In the archive, it may be in a subdirectory (e.g. whisper-bin-ubuntu-x64) or under build/bin
       const candidates = [
         path.join(CONFIG.paths.bin, `whisper-cli${ext}`),
         path.join(CONFIG.paths.bin, `main${ext}`),
         path.join(CONFIG.paths.bin, 'build', 'bin', `whisper-cli${ext}`)
       ];
 
+      // Add subdirectory candidates like whisper-bin-ubuntu-x64
+      const entries = fs.readdirSync(CONFIG.paths.bin);
+      for (const entry of entries) {
+        if (entry.startsWith('whisper-bin-')) {
+          candidates.push(path.join(CONFIG.paths.bin, entry, `whisper-cli${ext}`));
+        }
+      }
+
       for (const candidate of candidates) {
         if (fs.existsSync(candidate)) {
           if (candidate !== targetBinPath) {
-            fs.copyFileSync(candidate, targetBinPath);
+            if (platform === 'linux') {
+              // Create wrapper script pointing LD_LIBRARY_PATH to the dir of shared libraries
+              const candDir = path.dirname(candidate);
+              const script = `#!/bin/sh\nexport LD_LIBRARY_PATH="${candDir}:$LD_LIBRARY_PATH"\nexec "${candidate}" "$@"\n`;
+              fs.writeFileSync(targetBinPath, script, { mode: 0o755 });
+            } else {
+              try {
+                fs.copyFileSync(candidate, targetBinPath);
+              } catch (_) {
+                // If copy fails or isn't standalone, keep candidate
+                return candidate;
+              }
+            }
           }
           if (platform !== 'win32') {
             fs.chmodSync(targetBinPath, 0o755);
@@ -171,73 +227,34 @@ async function setupWhisperModel() {
   return modelPath;
 }
 
-async function setupOllamaAndS1Mini() {
-  console.log('\n--- 3. Setting up Ollama & s1-mini model ---');
-  const running = await isOllamaRunning();
-  if (!running) {
-    console.warn('[setup] Warning: Ollama does not seem to be running on 127.0.0.1:11434.');
-    console.warn('Please make sure Ollama is installed and started (`ollama serve`).');
-    if (!checkCommand('ollama')) {
-      console.warn('Install Ollama from https://ollama.com');
+async function setupCactusModel() {
+  console.log('\n--- 3. Setting up Cactus Whistle Model & Needle CLI ---');
+  const needleCli = resolveNeedleCli();
+  const whistlePath = path.join(CONFIG.paths.models, CONFIG.cactus.modelName);
+
+  if (!needleCli) {
+    console.log('[setup] Downloading needle CLI binary for linux-x86_64...');
+    const needleDest = path.join(CONFIG.paths.bin, 'needle');
+    if (!fs.existsSync(CONFIG.paths.bin)) fs.mkdirSync(CONFIG.paths.bin, { recursive: true });
+    try {
+      await downloadFile('https://huggingface.co/Cactus-Compute/needle3/resolve/main/linux-x86_64/needle', needleDest);
+      fs.chmodSync(needleDest, 0o755);
+      console.log(`[setup] Installed needle to ${needleDest}`);
+    } catch (err) {
+      console.warn(`[setup] Could not download needle binary: ${err.message}`);
     }
-    return;
+  } else {
+    console.log(`[setup] Found existing needle CLI at: ${needleCli}`);
   }
 
-  console.log('[setup] Ollama server is running.');
-  const models = await getOllamaModels();
-  if (models.includes(CONFIG.ollama.model)) {
-    console.log(`[setup] Model "${CONFIG.ollama.model}" is already configured in Ollama!`);
-    return;
+  if (fs.existsSync(whistlePath) && fs.statSync(whistlePath).size > 10 * 1024 * 1024) {
+    console.log(`[setup] Cactus Whistle model ready: ${whistlePath}`);
+    return whistlePath;
   }
 
-  console.log(`[setup] Model "${CONFIG.ollama.model}" not found in Ollama. Preparing s1-mini...`);
-
-  // Download GGUF if not present
-  const ggufPath = path.join(CONFIG.paths.models, CONFIG.ollama.s1MiniGgufName);
-  await downloadFile(CONFIG.ollama.s1MiniGgufUrl, ggufPath);
-
-  // Generate Modelfile pointing directly to local GGUF
-  const modelfileContent = `FROM ${ggufPath.replace(/\\/g, '/')}
-
-TEMPLATE """{{- if .System }}<|im_start|>system
-{{ .System }}<|im_end|>
-{{ end -}}
-{{- range .Messages -}}
-{{- if eq .Role "system" }}<|im_start|>system
-{{ .Content }}<|im_end|>
-{{ else if eq .Role "user" }}<|im_start|>user
-{{ .Content }}<|im_end|>
-{{ else if eq .Role "assistant" }}<|im_start|>assistant
-{{ .Content }}<|im_end|>
-{{ end -}}
-{{- end -}}
-{{- if .Prompt }}<|im_start|>user
-{{ .Prompt }}<|im_end|>
-{{ end -}}
-<|im_start|>assistant
-<think>
-
-</think>
-
-"""
-
-SYSTEM """You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text."""
-
-PARAMETER temperature 0
-PARAMETER num_ctx 4096
-`;
-
-  const modelfilePath = path.join(CONFIG.paths.root, 'Modelfile');
-  fs.writeFileSync(modelfilePath, modelfileContent, 'utf-8');
-  console.log(`[setup] Modelfile updated at ${modelfilePath}`);
-
-  console.log('[setup] Creating s1-mini model in Ollama (`ollama create s1-mini -f Modelfile`)...');
-  try {
-    execSync(`ollama create ${CONFIG.ollama.model} -f "${modelfilePath}"`, { stdio: 'inherit' });
-    console.log('[setup] s1-mini model created successfully in Ollama!');
-  } catch (err) {
-    console.error('[setup] Failed to create model in Ollama:', err.message);
-  }
+  console.log(`[setup] Downloading Cactus Whistle model (${CONFIG.cactus.modelName})...`);
+  await downloadFile(CONFIG.cactus.modelUrl, whistlePath);
+  return whistlePath;
 }
 
 async function setupAudioRecorder() {
@@ -270,7 +287,7 @@ async function run() {
   try {
     await setupWhisperCli();
     await setupWhisperModel();
-    await setupOllamaAndS1Mini();
+    await setupCactusModel();
     await setupAudioRecorder();
 
     console.log('\n==================================================');
@@ -278,7 +295,7 @@ async function run() {
     console.log('   Commands:');
     console.log('     npm run toggle       # Toggle voice recording on/off');
     console.log('     npm run record:start # Start recording');
-    console.log('     npm run record:stop  # Stop, transcribe, normalize, copy');
+    console.log('     npm run record:stop  # Stop, transcribe, and copy');
     console.log('==================================================\n');
     process.exit(0);
   } catch (err) {
@@ -291,4 +308,4 @@ if (require.main === module) {
   run();
 }
 
-module.exports = { run, resolveWhisperCli };
+module.exports = { run, resolveWhisperCli, resolveNeedleCli };

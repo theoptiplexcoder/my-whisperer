@@ -1,5 +1,6 @@
 *.gguf
 *.bin
+*.cact
 *.wav
 *.pid
 pid.txt
@@ -7,3 +8,5 @@ test-pw.lock
 test.lock
 test2.lock
 test_valid.txt
+bin/
+models/

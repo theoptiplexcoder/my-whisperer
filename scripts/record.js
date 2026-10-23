@@ -4,7 +4,7 @@ const { spawn, execSync } = require('child_process');
 const CONFIG = require('./config');
 const { notify, copyToClipboard } = require('./utils');
 const { checkCommand } = require('./download');
-const { resolveWhisperCli } = require('./setup');
+const { resolveWhisperCli, resolveNeedleCli } = require('./setup');
 const { normalizeText } = require('./normalize');
 
 function spawnRecorder(outputWav) {
@@ -173,66 +173,106 @@ async function stopRecording() {
   }
 
   notify('Voice Input', 'Transcribing...', 1200);
-  console.log('[record] Transcribing with whisper-cli...');
 
-  const whisperCli = resolveWhisperCli();
-  if (!whisperCli) {
-    notify('Voice Input', 'whisper-cli not found. Run npm run setup', 2500);
-    console.error('[record] Error: whisper-cli not found.');
-    return;
-  }
+  let rawTranscript = '';
 
-  let modelPath = path.join(models, CONFIG.whisper.modelName);
-  if (!fs.existsSync(modelPath)) {
-    // Check local fallback
-    const fallback = '/home/ybl/git/whisper.cpp/models/ggml-base.en.bin';
-    if (fs.existsSync(fallback)) {
-      modelPath = fallback;
-    } else {
-      notify('Voice Input', 'Whisper model not found. Run npm run setup', 2500);
-      console.error('[record] Error: Whisper model not found at', modelPath);
+  if (CONFIG.engine === 'cactus') {
+    console.log('[record] Transcribing with Cactus Whistle (needle)...');
+    const needleCli = resolveNeedleCli();
+    if (!needleCli) {
+      notify('Voice Input', 'needle CLI not found in bin/. Run npm run setup', 2500);
+      console.error('[record] Error: needle CLI not found.');
       return;
     }
+
+    const modelPath = path.join(models, CONFIG.cactus.modelName);
+    if (!fs.existsSync(modelPath)) {
+      notify('Voice Input', 'whistle.cact model not found.', 2500);
+      console.error('[record] Error: Whistle model not found at', modelPath);
+      return;
+    }
+
+    try {
+      const needleArgs = [
+        '--model', modelPath,
+        '--audio', audioFile
+      ];
+      if (CONFIG.cactus.language) {
+        needleArgs.push('--audio-language', CONFIG.cactus.language);
+      }
+      const output = execSync(`"${needleCli}" ${needleArgs.map(a => `"${a}"`).join(' ')}`, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      const parsed = JSON.parse(output.trim());
+      rawTranscript = (parsed.text || '').trim();
+    } catch (err) {
+      notify('Voice Input', 'Transcription failed', 2000);
+      console.error('[record] Cactus Whistle transcription failed:', err.message);
+      return;
+    }
+  } else {
+    console.log('[record] Transcribing with whisper-cli...');
+
+    const whisperCli = resolveWhisperCli();
+    if (!whisperCli) {
+      notify('Voice Input', 'whisper-cli not found. Run npm run setup', 2500);
+      console.error('[record] Error: whisper-cli not found.');
+      return;
+    }
+
+    let modelPath = path.join(models, CONFIG.whisper.modelName);
+    if (!fs.existsSync(modelPath)) {
+      // Check local fallback
+      const fallback = '/home/ybl/git/whisper.cpp/models/ggml-base.en.bin';
+      if (fs.existsSync(fallback)) {
+        modelPath = fallback;
+      } else {
+        notify('Voice Input', 'Whisper model not found. Run npm run setup', 2500);
+        console.error('[record] Error: Whisper model not found at', modelPath);
+        return;
+      }
+    }
+
+    if (fs.existsSync(resultFile)) {
+      try { fs.unlinkSync(resultFile); } catch (_) {}
+    }
+
+    const resultPrefix = path.join(CONFIG.paths.cache, 'result');
+    const whisperArgs = [
+      '-m', modelPath,
+      '-f', audioFile,
+      '-l', CONFIG.whisper.language,
+      '-ng',
+      '-t', String(CONFIG.whisper.threads),
+      '-bs', '1',
+      '-bo', '1',
+      '-nt',
+      '-np',
+      '-of', resultPrefix,
+      '-otxt'
+    ];
+
+    try {
+      const logStream = fs.openSync(logFile, 'w');
+      execSync(`"${whisperCli}" ${whisperArgs.map(a => `"${a}"`).join(' ')}`, {
+        stdio: ['ignore', logStream, logStream]
+      });
+      fs.closeSync(logStream);
+    } catch (err) {
+      notify('Voice Input', 'Transcription failed', 2000);
+      console.error('[record] Transcription failed:', err.message);
+      return;
+    }
+
+    if (!fs.existsSync(resultFile)) {
+      notify('Voice Input', 'Transcription failed', 2000);
+      console.error('[record] Result file not generated.');
+      return;
+    }
+
+    rawTranscript = fs.readFileSync(resultFile, 'utf8').trim();
   }
-
-  if (fs.existsSync(resultFile)) {
-    try { fs.unlinkSync(resultFile); } catch (_) {}
-  }
-
-  const resultPrefix = path.join(CONFIG.paths.cache, 'result');
-  const whisperArgs = [
-    '-m', modelPath,
-    '-f', audioFile,
-    '-l', CONFIG.whisper.language,
-    '-ng',
-    '-t', String(CONFIG.whisper.threads),
-    '-bs', '1',
-    '-bo', '1',
-    '-nt',
-    '-np',
-    '-of', resultPrefix,
-    '-otxt'
-  ];
-
-  try {
-    const logStream = fs.openSync(logFile, 'w');
-    execSync(`"${whisperCli}" ${whisperArgs.map(a => `"${a}"`).join(' ')}`, {
-      stdio: ['ignore', logStream, logStream]
-    });
-    fs.closeSync(logStream);
-  } catch (err) {
-    notify('Voice Input', 'Transcription failed', 2000);
-    console.error('[record] Transcription failed:', err.message);
-    return;
-  }
-
-  if (!fs.existsSync(resultFile)) {
-    notify('Voice Input', 'Transcription failed', 2000);
-    console.error('[record] Result file not generated.');
-    return;
-  }
-
-  let rawTranscript = fs.readFileSync(resultFile, 'utf8').trim();
   if (!rawTranscript) {
     notify('Voice Input', 'No speech detected', 1500);
     console.log('[record] No speech detected.');
@@ -240,10 +280,9 @@ async function stopRecording() {
   }
 
   console.log(`[record] Raw transcription: "${rawTranscript}"`);
-  console.log('[record] Normalizing with s1-mini...');
 
   const cleanedText = await normalizeText(rawTranscript);
-  console.log(`[record] Cleaned text: "${cleanedText}"`);
+  console.log(`[record] Final text: "${cleanedText}"`);
 
   if (!cleanedText) {
     notify('Voice Input', 'No speech detected', 1500);

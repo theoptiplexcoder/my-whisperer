@@ -2,12 +2,19 @@
 const fs = require('fs');
 const http = require('http');
 const CONFIG = require('./config');
-const { resolveWhisperCli } = require('./setup');
+const { resolveWhisperCli, resolveNeedleCli } = require('./setup');
 const { checkCommand } = require('./download');
 
 async function checkStatus() {
   console.log('=== My-Whisperer Status ===');
   console.log(`OS: ${process.platform} (${process.arch})`);
+  console.log(`Active STT Engine: ${CONFIG.engine.toUpperCase()}`);
+
+  // Cactus Whistle (needle)
+  const needleCli = resolveNeedleCli();
+  console.log(`needle CLI: ${needleCli ? `FOUND (${needleCli})` : 'NOT FOUND'}`);
+  const whistleModel = `${CONFIG.paths.models}/${CONFIG.cactus.modelName}`;
+  console.log(`Whistle Model (${CONFIG.cactus.modelName}): ${fs.existsSync(whistleModel) ? 'READY' : 'NOT FOUND'}`);
 
   // Whisper CLI
   const whisperCli = resolveWhisperCli();
@@ -18,26 +25,8 @@ async function checkStatus() {
   const modelExists = fs.existsSync(modelPath);
   console.log(`Whisper Model (${CONFIG.whisper.modelName}): ${modelExists ? 'READY' : 'NOT FOUND'}`);
 
-  // Ollama
-  http.get(`${CONFIG.ollama.host}/api/tags`, (res) => {
-    let data = '';
-    res.on('data', chunk => data += chunk);
-    res.on('end', () => {
-      try {
-        const parsed = JSON.parse(data);
-        const models = (parsed.models || []).map(m => m.name);
-        const hasS1 = models.some(m => m.startsWith('s1-mini'));
-        console.log(`Ollama Server: RUNNING`);
-        console.log(`s1-mini Model: ${hasS1 ? 'READY' : 'NOT CONFIGURED'}`);
-      } catch (_) {
-        console.log('Ollama Server: RUNNING (Unknown models)');
-      }
-      checkRecorders();
-    });
-  }).on('error', () => {
-    console.log(`Ollama Server: NOT RUNNING on ${CONFIG.ollama.host}`);
-    checkRecorders();
-  });
+  // Audio Recorders
+  checkRecorders();
 }
 
 function checkRecorders() {

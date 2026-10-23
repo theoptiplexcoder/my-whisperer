@@ -6,9 +6,14 @@ VOICE_DIR="$HOME/.cache/voiceprompt"
 AUDIO="$VOICE_DIR/recording.wav"
 PIDFILE="$VOICE_DIR/record.pid"
 TEXT="$VOICE_DIR/result.txt"
+ENGINE_FILE="$VOICE_DIR/engine"
 
-WHISPER="/home/ybl/git/whisper.cpp/build/bin/whisper-cli"
-MODEL="/home/ybl/git/whisper.cpp/models/ggml-base.en.bin"
+# Engine paths
+NEEDLE_BIN="/home/ybl/proj/my-voice-capture/my-whisperer/bin/needle"
+WHISTLE_MODEL="/home/ybl/proj/my-voice-capture/my-whisperer/models/whistle.cact"
+
+WHISPER_BIN="/home/ybl/proj/my-voice-capture/my-whisperer/bin/whisper-cli"
+WHISPER_MODEL="/home/ybl/proj/my-voice-capture/my-whisperer/models/ggml-base.en.bin"
 
 if [[ ! -f "$PIDFILE" ]]; then
     exit 0
@@ -40,74 +45,82 @@ notify-send \
 
 rm -f "$TEXT"
 
-"$WHISPER" \
-    -m "$MODEL" \
-    -f "$AUDIO" \
-    -l en \
-    -ng \
-    -t 4 \
-    -bs 1 \
-    -bo 1 \
-    -nt \
-    -np \
-    -of "$VOICE_DIR/result" \
-    -otxt \
-    > "$VOICE_DIR/whisper.log" 2>&1
-
-if [[ ! -f "$TEXT" ]]; then
-    notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 2000 "Voice Input" "Transcription failed"
-    exit 1
+ENGINE="cactus"
+if [[ -f "$ENGINE_FILE" ]]; then
+    ENGINE=$(cat "$ENGINE_FILE" | tr -d '[:space:]')
 fi
 
-# Remove leading/trailing whitespace
-sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEXT"
+if [[ "$ENGINE" == "whisper" ]]; then
+    # Run whisper.cpp
+    "$WHISPER_BIN" \
+        -m "$WHISPER_MODEL" \
+        -f "$AUDIO" \
+        -l en \
+        -ng \
+        -t 4 \
+        -bs 1 \
+        -bo 1 \
+        -nt \
+        -np \
+        -of "$VOICE_DIR/result" \
+        -otxt \
+        > "$VOICE_DIR/whisper.log" 2>&1 || true
 
-if [[ ! -s "$TEXT" ]]; then
+    if [[ -f "$TEXT" ]]; then
+        RAW_TEXT=$(cat "$TEXT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    else
+        RAW_TEXT=""
+    fi
+else
+    # Run Cactus Whistle transcription
+    NEEDLE_OUT=$("$NEEDLE_BIN" --model "$WHISTLE_MODEL" --audio "$AUDIO" --audio-language en 2>"$VOICE_DIR/whisper.log" || true)
+
+    RAW_TEXT=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(data.get('text', '').strip())
+except Exception:
+    pass
+" "$NEEDLE_OUT")
+fi
+
+if [[ -z "$RAW_TEXT" ]]; then
     notify-send -h string:x-canonical-private-synchronous:voiceprompt -t 1500 "Voice Input" "No speech detected"
     exit 0
 fi
 
-# Post-process with s1-mini text normalizer via Ollama
-RAW_TEXT=$(cat "$TEXT")
+printf "%s" "$RAW_TEXT" > "$TEXT"
+# Format keyboard shortcuts if spoken (e.g., SuperPlusM -> Super+M, ControlPlusC -> Ctrl+C)
 CLEANED_TEXT=$(python3 -c "
-import urllib.request
-import json
-import sys
+import sys, re
 
-raw_text = sys.stdin.read().strip()
-if not raw_text:
+text = sys.stdin.read().strip()
+if not text:
     sys.exit(0)
 
-system_prompt = 'You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.'
-control_line = '[Styling: semi-formal] [Structure: prose] [Context: general]'
-full_prompt = (
-    f'<|im_start|>system\n{system_prompt}<|im_end|>\n'
-    f'<|im_start|>user\n{control_line}\n{raw_text}<|im_end|>\n'
-    '<|im_start|>assistant\n<think>\n\n</think>\n\n'
-)
+pattern_plus = r'\b(Super|Ctrl|Control|Alt|Shift|Cmd|Command|Win|Windows|Meta)(?:Plus(?:Super|Ctrl|Control|Alt|Shift|Cmd|Command|Win|Windows|Meta|[A-Za-z0-9]|F[1-9]|F1[0-2]|Enter|Space|Tab|Esc|Escape|Backspace|Delete))+\b'
+def replace_camel(m):
+    parts = m.group(0).split('Plus')
+    return '+'.join([p.capitalize() if len(p) > 1 else p.upper() for p in parts])
+text = re.sub(pattern_plus, replace_camel, text, flags=re.IGNORECASE)
 
-payload = {
-    'model': 's1-mini',
-    'prompt': full_prompt,
-    'raw': True,
-    'stream': False,
-    'options': {'temperature': 0}
-}
+pattern_spoken = r'\b(super|ctrl|control|alt|shift|cmd|command|win|windows|meta)\s+plus\s+([a-zA-Z0-9]+(?:\s+plus\s+[a-zA-Z0-9]+)*)\b'
+def replace_spoken(m):
+    words = re.split(r'\s+plus\s+', m.group(0), flags=re.IGNORECASE)
+    formatted = []
+    for w in words:
+        w_lower = w.lower()
+        if w_lower in ('control', 'ctrl'): formatted.append('Ctrl')
+        elif w_lower in ('super', 'win', 'windows', 'meta', 'cmd', 'command', 'alt', 'shift', 'enter', 'space', 'tab', 'esc', 'escape'): formatted.append(w.capitalize())
+        elif len(w) == 1: formatted.append(w.upper())
+        else: formatted.append(w)
+    return '+'.join(formatted)
+text = re.sub(pattern_spoken, replace_spoken, text, flags=re.IGNORECASE)
+text = re.sub(r'\bControl\+', 'Ctrl+', text)
 
-try:
-    req = urllib.request.Request(
-        'http://127.0.0.1:11434/api/generate',
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'}
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        res = json.loads(resp.read().decode('utf-8'))
-        resp_text = res.get('response', '').strip()
-        sys.stdout.write(resp_text)
-except Exception:
-    # If Ollama request fails, fallback to raw transcription
-    sys.stdout.write(raw_text)
-" < "$TEXT")
+sys.stdout.write(text)
+" <<< "$RAW_TEXT")
 
 printf "%s" "$CLEANED_TEXT" > "$TEXT"
 
